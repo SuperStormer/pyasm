@@ -2,6 +2,8 @@
 
 Decompiles dis.dis output
 
+*Note: pyasm has only been tested on Python 3.8 disassemblies, using pyasm on disassemblies from other versions may or may not work.*
+
 ## Installation
 
 ```bash
