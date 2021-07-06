@@ -2,6 +2,12 @@
 
 Decompiles dis.dis output
 
+## Installation
+
+```bash
+pip install git+https://github.com/SuperStormer/pyasm.git
+```
+
 ## Example Usage
 
 ```bash
