@@ -10,7 +10,7 @@ pip install git+https://github.com/SuperStormer/pyasm.git
 
 ## Example Usage
 
-```bash
+```python
 $ pyasm samples/disas.txt
 def main():
         s = input('Guess?')
