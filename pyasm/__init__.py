@@ -1,11 +1,13 @@
+from multiprocessing import Value
 import re
 from ast import literal_eval
 from dataclasses import dataclass
 from io import StringIO
+from tabnanny import verbose
 from types import CodeType
 
 import uncompyle6.main
-import xdis.opcodes.opcode_38 as opcodes
+from xdis.op_imports import op_imports, canonic_python_version
 
 @dataclass
 class Instruction:
@@ -39,7 +41,6 @@ def dis_to_instructions(disasm):
 
 def list_to_bytecode(l, opc):
 	"""Convert list/tuple of list/tuples to bytecode
-    _names_ contains a list of name objects
 	based on https://github.com/rocky/python-xdis/blob/master/xdis/bytecode.py
     """
 	bc = bytearray()
@@ -66,19 +67,26 @@ def list_to_bytecode(l, opc):
 			bc.append(0)
 	return bytes(bc)
 
-def instructions_to_code(instructions, code_objects=None, name="main", filename="out.py", flags=0):
+def instructions_to_code(
+	instructions, code_objects=None, version=None, name="main", filename="out.py", flags=0
+):
 	""" converts list of instruction into a code object"""
 	if code_objects is None:
-		code_objects = []
+		code_objects = {}
 	arg_names = []
 	var_dict = {}
 	const_dict = {}
 	globals_dict = {}
 	names_dict = {}
 	cellvars_dict = {}
+	
 	lineno = None
 	prev_offset = 0
 	lnotab = bytearray()
+	
+	# https://github.com/rocky/python-xdis/blob/master/xdis/op_imports.py#L182
+	opcodes = op_imports[canonic_python_version[version]]
+	
 	for instruction in instructions:
 		if lineno is None:
 			lineno = instruction.line_num
@@ -100,7 +108,8 @@ def instructions_to_code(instructions, code_objects=None, name="main", filename=
 			prev_offset = instruction.offset
 			lineno = instruction.line_num
 		elif instruction.line_num < lineno:
-			print(instruction, lineno)
+			raise ValueError(f"{instruction} line_num is greater than actual {lineno}")
+		
 		opname = instruction.opname
 		if opname == "LOAD_CONST":
 			if instruction.argval.startswith("<code"):
@@ -114,26 +123,27 @@ def instructions_to_code(instructions, code_objects=None, name="main", filename=
 			names_dict[instruction.arg] = instruction.argval
 		elif opname == "LOAD_FAST":
 			var_name = instruction.argval
-			#if var_name.startswith("."):
-			#	var_name = "__" + var_name[1:]
 			if var_name not in var_dict.values():
 				arg_names.append(var_name)
 				var_dict[instruction.arg] = var_name
 		elif opname in ("LOAD_NAME", "STORE_NAME", "LOAD_METHOD", "LOAD_ATTR"):
 			names_dict[instruction.arg] = instruction.argval
 		elif opname in ("LOAD_DEREF", "LOAD_CLOSURE", "STORE_DEREF"):
-			if instruction.arg in cellvars_dict and cellvars_dict[instruction.arg
-																	] != instruction.argval:
+			if (
+				instruction.arg in cellvars_dict and
+				cellvars_dict[instruction.arg] != instruction.argval
+			):
 				raise ValueError(instruction, cellvars_dict)
 			cellvars_dict[instruction.arg] = instruction.argval
 		elif opname == "STORE_FAST":
 			var_dict[instruction.arg] = instruction.argval
 		elif opname in ("YIELD_ITER", "YIELD_FROM"):
 			flags |= 0x20
+	
 	argcount = len(arg_names)
 	posonlyargcount = 0
 	kwonlyargcount = 0
-	nlocals = len(var_dict)  #- len(arg_names)
+	nlocals = len(var_dict)
 	stacksize = 100
 	codestring = list_to_bytecode(
 		[
@@ -166,16 +176,18 @@ def instructions_to_code(instructions, code_objects=None, name="main", filename=
 
 def get_code_obj_name(s):
 	match = re.match(r"<code object <?(.*?)>? at (0x[0-9a-f]+).*>", s)
+	assert match is not None
 	return "<" + match.group(1) + ">"
-	#return match.group(1) + "_" + match.group(2)
 
 def split_funcs(disasm):
 	""" splits out comprehensions from the main func or functions from the module"""
 	start_positions = [0]
 	end_positions = []
 	names = []
+	
 	if not disasm.startswith("Disassembly"):
 		names.append("main")
+	
 	for match in re.finditer(r"Disassembly of (.+):", disasm):
 		end_positions.append(match.start())
 		start_positions.append(match.end())
@@ -184,45 +196,58 @@ def split_funcs(disasm):
 			names.append(get_code_obj_name(name))
 		else:
 			names.append(name)
+	
 	end_positions.append(len(disasm))
 	if disasm.startswith("Disassembly"):
 		start_positions.pop(0)
 		end_positions.pop(0)
+	
 	for start, end, name in zip(start_positions, end_positions, names):
 		yield (name, disasm[start:end])
 
-def asm(disasm, name="main", filename="out.py", flags=0):
+def asm(disasm, code_objects=None, version=None, name="main", filename="out.py", flags=0):
 	""" assembles dis.dis output into a code object"""
 	instructions = dis_to_instructions(disasm)
-	return instructions_to_code(instructions, name, filename, flags)
+	return instructions_to_code(
+		instructions,
+		code_objects=code_objects,
+		version=version,
+		name=name,
+		filename=filename,
+		flags=flags
+	)
 
-def asm_all(disasm, filename="out.py"):
+def asm_all(disasm, filename="out.py", version=None):
 	""" assembles all functions within a dis.dis output"""
 	disasm = re.sub(r"^#.*\n?", "", disasm, re.MULTILINE).strip()  # ignore comments
 	code_objects = {}
-	#ret = []
+	
 	for name, func in reversed(list(split_funcs(disasm))):
-		code, arg_names = asm(func, code_objects, name, filename)
+		code, arg_names = asm(
+			func, code_objects=code_objects, version=version, name=name, filename=filename
+		)
 		code_objects[name] = code
 		yield name, code, arg_names
-	#return ret
 
 def decompile(disasm, filename="out.py", version=None):
 	""" decompiles a disassembly """
-	for name, code, arg_names in asm_all(disasm, filename):
+	for name, code, arg_names in asm_all(disasm, filename, version):
 		out = StringIO()
-		uncompyle6.main.decompile(version, code, out)
-		yield name, "\n".join(
+		uncompyle6.main.decompile(
+			co=code, bytecode_version=tuple(map(int, version.split("."))), out=out
+		)
+		decompiled = "\n".join(
 			line for line in out.getvalue().split("\n") if not line.startswith("# ")
-		), arg_names
+		)
+		yield name, decompiled, arg_names
 
-def pretty_decompile(disasm, filename="out.py", version=None, tab_char="\t"):
+def pretty_decompile(disasm, filename="out.py", version=None, tab_char="    "):
 	""" decompiles disassembly in human-readable form """
 	ret = []
 	for name, code, arg_names in decompile(disasm, filename, version):
 		if not name.startswith("<"):
 			ret.append(
-				f"def {name}({','.join(arg_names)}):\n" +
+				f"def {name}({', '.join(arg_names)}):\n" +
 				"\n".join(tab_char + line for line in code.split("\n"))
 			)
 	return "\n".join(ret)
@@ -234,27 +259,11 @@ def main():
 	parser.add_argument("file", type=argparse.FileType("r"))
 	parser.add_argument("-f", "--filename", default="out.py")
 	parser.add_argument("-o", "--output", type=argparse.FileType("r"), default=sys.stdout)
+	parser.add_argument("-v", "--version", default=None)
 	args = parser.parse_args()
 	with args.file as f:
-		with args.output as o:
-			print(pretty_decompile(f.read(), args.filename), file=o)
+		with args.output as out:
+			print(pretty_decompile(f.read(), args.filename, args.version), file=out)
 
 if __name__ == "__main__":
 	main()
-	"""import dis
-	f = list_to_bytecode
-	out = StringIO()
-	dis.dis(f, file=out)
-	for name, code, arg_names in asm_all(out.getvalue()):
-		if name == "main":
-			dis.dis(code, file=open("x.txt", "w"))
-			main_code = code
-	print(out.getvalue(), file=open("y.txt", "w"))
-	
-	def main():
-		pass
-	
-	main.__code__ = main_code
-	main([("LOAD_CONST", 0)], opcodes)
-	print(pretty_decompile(out.getvalue(), tab_char=" " * 4))
-	"""
