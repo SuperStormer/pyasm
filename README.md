@@ -1,10 +1,18 @@
 # pyasm
 
-Decompiles dis.dis output
+`pyasm` decompiles dis.dis output by converting it into a code object and then running `uncompyle6` on the code object. This is intended for use on CTF problems where only this output is provided; if you have a `.pyc` file just use [uncompyle6](https://github.com/rocky/python-uncompyle6/) or one of the various other .pyc decompilers.
+
+*Note: pyasm has only been tested on Python 3.8 disassemblies, using pyasm on disassemblies from other versions may or may not work.*
+
+## Installation
+
+```bash
+pip install git+https://github.com/SuperStormer/pyasm.git
+```
 
 ## Example Usage
 
-```bash
+```python
 $ pyasm samples/disas.txt
 def main():
         s = input('Guess?')
