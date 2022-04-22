@@ -276,7 +276,6 @@ def pretty_decompile(disasm, filename="out.py", version=None, tab_char="    "):
 
 def main():
 	import argparse
-	import sys
 	parser = argparse.ArgumentParser(description="Decompiles dis.dis output")
 	parser.add_argument("file", nargs="?", type=argparse.FileType("r"), default=sys.stdin)
 	parser.add_argument("-f", "--filename", default="out.py")
