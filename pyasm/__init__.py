@@ -1,9 +1,8 @@
-from multiprocessing import Value
+import sys
 import re
 from ast import literal_eval
 from dataclasses import dataclass
 from io import StringIO
-from tabnanny import verbose
 from types import CodeType
 
 import uncompyle6.main
@@ -40,8 +39,8 @@ def dis_to_instructions(disasm):
 	return instructions
 
 def list_to_bytecode(l, opc):
-	"""Convert list/tuple of list/tuples to bytecode
-	based on https://github.com/rocky/python-xdis/blob/master/xdis/bytecode.py
+	"""Convert list of (opname, arg) tuples to bytecode
+	based on https://github.com/rocky/python-xdis/blob/master/xdis/bytecode.py#L433
     """
 	bc = bytearray()
 	extended_arg = False
@@ -73,6 +72,7 @@ def instructions_to_code(
 	""" converts list of instruction into a code object"""
 	if code_objects is None:
 		code_objects = {}
+	
 	arg_names = []
 	var_dict = {}
 	const_dict = {}
@@ -85,6 +85,8 @@ def instructions_to_code(
 	lnotab = bytearray()
 	
 	# https://github.com/rocky/python-xdis/blob/master/xdis/op_imports.py#L182
+	if version is None:
+		version = ".".join(map(str, sys.version_info[:3]))
 	opcodes = op_imports[canonic_python_version[version]]
 	
 	for instruction in instructions:
@@ -177,7 +179,7 @@ def instructions_to_code(
 def get_code_obj_name(s):
 	match = re.match(r"<code object <?(.*?)>? at (0x[0-9a-f]+).*>", s)
 	assert match is not None
-	return "<" + match.group(1) + ">"
+	return f"<{match.group(1)}>", match.group(2)
 
 def split_funcs(disasm):
 	""" splits out comprehensions from the main func or functions from the module"""
@@ -202,8 +204,10 @@ def split_funcs(disasm):
 		start_positions.pop(0)
 		end_positions.pop(0)
 	
-	for start, end, name in zip(start_positions, end_positions, names):
-		yield (name, disasm[start:end])
+	return {
+		name: disasm[start:end]
+		for start, end, name in zip(start_positions, end_positions, names)
+	}
 
 def asm(disasm, code_objects=None, version=None, name="main", filename="out.py", flags=0):
 	""" assembles dis.dis output into a code object"""
@@ -222,15 +226,33 @@ def asm_all(disasm, filename="out.py", version=None):
 	disasm = re.sub(r"^#.*\n?", "", disasm, re.MULTILINE).strip()  # ignore comments
 	code_objects = {}
 	
-	for name, func in reversed(list(split_funcs(disasm))):
+	funcs = split_funcs(disasm)
+	
+	assembled = {}
+	for name, func in reversed(funcs.items()):
+		if isinstance(name, tuple):  # list comps and lambdas
+			real_name = name[0]
+		else:
+			real_name = name
 		code, arg_names = asm(
-			func, code_objects=code_objects, version=version, name=name, filename=filename
+			func, code_objects=code_objects, version=version, name=real_name, filename=filename
 		)
 		code_objects[name] = code
-		yield name, code, arg_names
+		
+		assembled[real_name] = (code, arg_names)
+	
+	for name in funcs.keys():  # ensure output is in original order
+		if isinstance(name, tuple):  # list comps and lambdas
+			real_name = name[0]
+		else:
+			real_name = name
+		yield real_name, *assembled[real_name]
 
 def decompile(disasm, filename="out.py", version=None):
 	""" decompiles a disassembly """
+	if version is None:
+		version = ".".join(map(str, sys.version_info[:3]))
+	
 	for name, code, arg_names in asm_all(disasm, filename, version):
 		out = StringIO()
 		uncompyle6.main.decompile(
@@ -256,7 +278,7 @@ def main():
 	import argparse
 	import sys
 	parser = argparse.ArgumentParser(description="Decompiles dis.dis output")
-	parser.add_argument("file", type=argparse.FileType("r"))
+	parser.add_argument("file", nargs="?", type=argparse.FileType("r"), default=sys.stdin)
 	parser.add_argument("-f", "--filename", default="out.py")
 	parser.add_argument("-o", "--output", type=argparse.FileType("r"), default=sys.stdout)
 	parser.add_argument("-v", "--version", default=None)
